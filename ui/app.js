@@ -1,1041 +1,233 @@
-import { focusTextInputIfAllowed } from "./focus-helpers.mjs";
-import { shouldTranslateOnInput, shouldTranslateOnEnter } from "./ime-guards.mjs";
-import { canRetranslateNow } from "./retranslate.mjs";
-import { isNewerVersion } from "./version.mjs";
-
-const LANGUAGES = [
-  { value: "auto", label: "自动检测" },
-  { value: "zh-CHS", label: "中文简体" },
-  { value: "zh-CHT", label: "中文繁体" },
-  { value: "en", label: "英语" },
-  { value: "ja", label: "日语" },
-  { value: "ko", label: "韩语" },
-  { value: "fr", label: "法语" },
-  { value: "de", label: "德语" },
-  { value: "ru", label: "俄语" },
-  { value: "es", label: "西班牙语" }
-];
-
-const TTS_LANG_MAP = {
-  "zh-CHS": "zh-CN", "zh-CN": "zh-CN",
-  "zh-CHT": "zh-TW", "zh-TW": "zh-TW",
-  "en": "en-US", "ja": "ja-JP", "ko": "ko-KR",
-  "fr": "fr-FR", "de": "de-DE", "ru": "ru-RU", "es": "es-ES"
-};
-
-const TRANSLATE_ENGINES = [
-  { value: "bing", label: "必应" },
-  { value: "google", label: "Google" },
-  { value: "microsoft", label: "微软" },
-  { value: "transmart", label: "腾讯" },
-  { value: "yandex", label: "Yandex" },
-  { value: "iciba", label: "词霸" },
-  { value: "llm", label: "AI 大模型" }
-];
-
-const PROXY_MODES = [
-  { value: "system", label: "系统代理" },
-  { value: "custom", label: "自定义" },
-  { value: "none", label: "不使用" }
-];
-
-// Measure the height the window needs to fit the whole app content (header +
-// translation area + settings panel) without leaving blank space.
-//
-// IMPORTANT: the settings panel uses `flex: 1 1 auto`, so once the window has
-// been enlarged the panel is stretched to fill the remaining space and its
-// `offsetHeight`/`scrollHeight` no longer reflect the content's natural height.
-// Reading those would make the window grow a little on every engine switch.
-// Instead we measure the panel's *content* (its `.settings-section` children),
-// which is unaffected by how tall the panel is stretched.
-function applyPin() {
-  const pinned = Boolean(state.settings && state.settings.pinOnTop);
-  const btn = document.querySelector("#pin-btn");
-  if (btn) {
-    btn.classList.toggle("on", pinned);
-    btn.setAttribute("aria-pressed", pinned ? "true" : "false");
-    btn.title = pinned ? "取消置顶" : "置顶窗口";
-    // 按钮里现在只有图标没有文字，辅助技术只能读到 label，所以状态变了要一起改。
-    btn.setAttribute("aria-label", pinned ? "取消置顶" : "置顶窗口");
-  }
-  // 置顶状态是跟着设置存的，所以每次渲染都把它回写到窗口上：换设备/手改过
-  // settings.json 之后，按钮和窗口不会各说各话。
-  invoke?.("set_pin_on_top", { pinned }).catch(() => {});
-}
-
-function settingsHeight() {
-  const appEl = document.querySelector(".bento-app");
-  const header = document.querySelector(".header-block");
-  const textBlock = document.querySelector(".text-block");
-  const panel = document.querySelector("#settings-panel");
-  if (appEl && header && textBlock && panel) {
-    const appCs = getComputedStyle(appEl);
-    const appPadding = parseFloat(appCs.paddingTop) + parseFloat(appCs.paddingBottom);
-    const appGap = parseFloat(appCs.rowGap || appCs.gap) || 0;
-
-    // Natural content height of the settings panel = its own vertical padding
-    // plus the height of every visible section inside it.
-    const panelCs = getComputedStyle(panel);
-    let panelContent = parseFloat(panelCs.paddingTop) + parseFloat(panelCs.paddingBottom);
-    panel.querySelectorAll(":scope > .settings-section").forEach(section => {
-      if (getComputedStyle(section).display === "none") return;
-      const sCs = getComputedStyle(section);
-      panelContent +=
-        section.offsetHeight +
-        parseFloat(sCs.marginTop) +
-        parseFloat(sCs.marginBottom);
-    });
-
-    // header + text-block + panel content, with two gaps between the three
-    // top-level blocks, plus the app container padding.
-    const total =
-      header.offsetHeight +
-      textBlock.offsetHeight +
-      panelContent +
-      appGap * 2 +
-      appPadding;
-    const measured = Math.ceil(total) + 2;
-    if (measured > 0) return measured;
-  }
-  // Fallback estimate.
-  let h = 560;
-  if (state.settings?.textTranslateEngine === "llm") h += 200;
-  if (state.settings?.proxyMode === "custom") h += 56;
-  return h;
-}
-
-let debounceTimer = null;
-// Monotonic id for translation requests. Each new request supersedes older
-// in-flight ones so their (stale) results are discarded, letting the user edit
-// and re-translate at any time — even mid-translation.
-let translateSeq = 0;
-
-function cancelPendingTranslation() {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
-  }
-}
-
-function debouncedTranslate() {
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    const text = state.inputText.trim();
-    if (text) {
-      translateText();
-    } else {
-      // Input cleared: cancel any in-flight result and reset the output.
-      translateSeq++;
-      state.textLoading = false;
-      state.translatedText = "";
-      state.alternatives = [];
-      state.detectedLang = "";
-      updateOutputArea();
-      updateDetectedLang();
-    }
-  }, 500);
-}
-
-// Changing a language or engine select leaves the *previous* result on screen,
-// which used to mean one more Enter press to see the new one. Re-run the
-// translation on the change instead. `awaitPersisted` matters for the engine:
-// translate_text gets the languages as arguments, but the engine itself is read
-// from the saved settings by the Rust side, so the write has to land first.
-async function retranslateNow({ awaitPersisted = false } = {}) {
-  cancelPendingTranslation();
-  const s = state.settings;
-  if (!s) return;
-  if (!canRetranslateNow({
-    inputText: state.inputText,
-    engine: s.textTranslateEngine,
-    llmApiKey: s.llmConfig && s.llmConfig.apiKey,
-  })) {
-    // Keep the previous readable result, but prevent an older request from
-    // committing after the user switched to an option that cannot translate.
-    translateSeq++;
-    return;
-  }
-  if (awaitPersisted) {
-    try {
-      await saveSettings();
-    } catch (err) {
-      // The backend still has the old engine, so do not issue a request that
-      // would look like a successful translation with the wrong configuration.
-      translateSeq++;
-      return;
-    }
-  }
-  await translateText();
-}
+import { LANGUAGES, defaultSettings, captureSettings, swappedLanguages, shortcutFromEvent, sameShortcut } from "./capture-controls.mjs";
 
 const app = document.querySelector("#app");
 const mode = window.__APP_MODE__ || "main";
 document.body.dataset.mode = mode.startsWith("overlay") ? "overlay" : "main";
-
+const state = { settings: null, settingsOpen: true, busy: false, status: "", statusType: "", recording: null };
 let invoke, listen;
-
-const state = {
-  settings: null,
-  overlay: null,
-  status: "",
-  statusType: "",
-  loading: false,
-  listenersBound: false,
-  inputText: "",
-  translatedText: "",
-  alternatives: [],
-  textLoading: false,
-  detectedLang: "",
-  ttsPlaying: false,
-  hotkeyRecording: false,
-  settingsOpen: false
+let pendingSave = Promise.resolve();
+const icons = {
+  capture: '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"/><path d="M8 8h8v8H8z"/>',
+  copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+  pin: '<path d="M9 3h6l-1 7 3 3v2H7v-2l3-3zM12 15v6"/>',
+  settings: '<path d="m9 3-1 3-3 1v4l2 1-2 2v4l3 1 1 2h6l1-2 3-1v-4l-2-2 2-1V7l-3-1-1-3z"/><circle cx="12" cy="12" r="3"/>',
 };
-
-function defaultSettings() {
-  return {
-    fromLang: "auto",
-    toLang: "zh-CHS",
-    clientele: "deskdict",
-    client: "deskdict",
-    vendor: "fanyiweb_navigation",
-    inputChannel: "YoudaoDict_fanyiweb_navigation",
-    appVersion: "10.3.0",
-    abTest: "2",
-    model: "default",
-    screen: "1920*1080",
-    osVersion: "14.0",
-    network: "none",
-    mid: "macos14.0",
-    product: "macdict",
-    yduuid: `web-${Date.now()}`,
-    overlayOpacity: 0.92,
-    overlayFontScale: 1,
-    closeOnOutsideClick: true,
-    autostart: false,
-    hotkey: "CommandOrControl+Shift+X",
-    copyHotkey: "CommandOrControl+Shift+C",
-    textTranslateEngine: "bing",
-    llmConfig: {
-      baseUrl: "https://api.openai.com/v1/chat/completions",
-      apiKey: "",
-      model: "gpt-4o-mini",
-      prompt: "You are a professional translator. Translate the following text from {from} to {to}. Only output the translation, nothing else. Do not add explanations or notes.",
-      autoPrompt: "You are a professional translator. Detect the source language and translate the following text to {to}. Only output the translation, nothing else. Do not add explanations or notes."
-    },
-    popupShortcut: null,
-    proxyMode: "system",
-    customProxy: "",
-    pinOnTop: false
-  };
-}
-
-/* ── Helpers ── */
-
-function escapeHtml(v) {
-  return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;").replaceAll("'","&#39;");
-}
-
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function waitForNextPaint() {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(resolve);
-    });
-  });
-}
+const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name]}</svg>`;
+const escapeHtml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+const shortcutHtml = value => value ? value.replaceAll("CommandOrControl", "Ctrl").replaceAll("Control", "Ctrl").split("+").map(part => `<kbd>${escapeHtml(part)}</kbd>`).join('<span class="key-plus">+</span>') : '<span class="muted">未设置</span>';
 
 function setCapturePreparing(active) {
   document.documentElement.classList.toggle("capture-preparing", active);
   document.body.classList.toggle("capture-preparing", active);
 }
 
-function languageOptions(current) {
-  return LANGUAGES.map(l =>
-    `<option value="${l.value}" ${l.value === current ? "selected" : ""}>${l.label}</option>`
-  ).join("");
+function updateStatus() {
+  const status = document.querySelector("#status");
+  if (status) {
+    status.textContent = state.status || "框选后自动翻译，按 Esc 或右键取消";
+    status.classList.toggle("error", state.statusType === "error");
+  }
+  document.querySelectorAll("[data-capture]").forEach(button => { button.disabled = state.busy || Boolean(state.recording); });
 }
 
-function fallbackTargetLang(fromLang) {
-  const detected = state.detectedLang;
-  if (detected && detected !== "auto" && detected !== fromLang) return detected;
-  return fromLang === "zh-CHS" ? "en" : "zh-CHS";
+function showError(error) {
+  state.status = error instanceof Error ? error.message : String(error);
+  state.statusType = "error";
+  updateStatus();
 }
-
-function swapLanguages() {
-  if (!state.settings) return;
-  const from = state.settings.fromLang;
-  const to = state.settings.toLang;
-  const nextFrom = to === "auto" ? fallbackTargetLang(from) : to;
-  const nextTo = from === "auto" ? fallbackTargetLang(nextFrom) : from;
-  state.settings.fromLang = nextFrom;
-  state.settings.toLang = nextTo;
-  const fromEl = document.querySelector("#from-lang");
-  const toEl = document.querySelector("#to-lang");
-  if (fromEl) fromEl.value = nextFrom;
-  if (toEl) toEl.value = nextTo;
-  saveSettings().catch(() => {});
-  // The swap button changes both languages at once, so the result on screen is
-  // stale for the same reason a dropdown change is.
-  retranslateNow().catch(() => {});
-}
-
-function shortcutKeysHtml(hk) {
-  const parts = hk.replace("CommandOrControl", "Ctrl").split("+");
-  return parts.map(p => `<span class="shortcut-key">${escapeHtml(p)}</span>`).join(" + ");
-}
-
-function renderFatal(msg) {
-  if (app) app.innerHTML = `<div class="bento-app"><div class="block" style="padding:20px"><span class="status-text error">启动失败: ${escapeHtml(msg)}</span></div></div>`;
-}
-
-/* ── Tauri bootstrap ── */
 
 async function ensureTauriApi() {
-  if (invoke && listen) return;
-  const attempts = (window.__TAURI__ || window.__TAURI_INTERNALS__) ? 100 : 5;
-  for (let i = 0; i < attempts; i++) {
-    const t = window.__TAURI__;
-    const ti = window.__TAURI_INTERNALS__;
-    const nextInvoke = t?.core?.invoke || ti?.invoke;
-    const nextListen = t?.event?.listen || ti?.event?.listen;
-    if (nextInvoke) {
-      invoke = nextInvoke;
-      listen = nextListen || null;
-      return;
-    }
-    await delay(20);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const tauri = window.__TAURI__;
+    const internal = window.__TAURI_INTERNALS__;
+    invoke = tauri?.core?.invoke || internal?.invoke;
+    listen = tauri?.event?.listen;
+    if (invoke) return;
+    if (!tauri && !internal && attempt > 4) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
   }
-  // Browser preview: keep the UI usable when the Tauri runtime is absent.
-  invoke = async (cmd, args) => {
-    if (cmd === "load_settings") return defaultSettings();
-    if (cmd === "save_settings") return args?.settings || defaultSettings();
-    if (cmd === "list_history") return [];
-    if (cmd === "resize_main_window" || cmd === "hide_window" || cmd === "close_overlay") return null;
-    throw new Error("当前是浏览器预览，截图/翻译需要桌面应用");
+  // Standalone browser preview. Capture always requires the desktop runtime.
+  invoke = async (command, args) => {
+    if (command === "load_settings") return captureSettings(JSON.parse(localStorage.getItem("screentrans-preview") || "null") || defaultSettings());
+    if (command === "save_settings") {
+      localStorage.setItem("screentrans-preview", JSON.stringify(captureSettings(args.settings)));
+      return args.settings;
+    }
+    if (["set_pin_on_top", "resize_main_window", "hide_window"].includes(command)) return;
+    throw new Error("请在 ScreenTrans 桌面应用中使用截图功能");
   };
-  listen = async () => () => {};
 }
 
-async function loadSettings() { state.settings = await invoke("load_settings"); }
-async function saveSettings() { state.settings = await invoke("save_settings", { settings: state.settings }); }
-
-// 更新检查：只查 GitHub Releases 的最新 tag，比当前版本新才把按钮换成「打开下载页」。
-// 版本比较在 ui/version.mjs（有单测）。打开动作走 Rust 的 open_release_page，它不收
-// 参数、要打开的地址是 Rust 侧的常量，前端这里只负责说「打开」。
-// 启动后静默查一次，查不到（离线 / 限流）不打扰。
-//
-// 这一行的状态全收在下面几个变量里，只有 renderUpdateRow() 一处写 DOM。启动那次静默
-// 检查和用户手动点的那次可能同时在飞（静默那次走代理最长 20s），所以照 translateSeq
-// 的同一办法处理：每次检查领一个号，回来时号不是最新的那一次直接丢弃，不碰状态也不碰
-// DOM —— 否则「更早发出、更晚返回」的那次会把用户刚点出来的结果盖掉。
-let pendingUpdate = null;
-let updateChecking = false;
-let updateHint = "";
-let updateSeq = 0;
-let appVersion = "";
-let silentUpdateStarted = false;
-
-function renderUpdateRow() {
-  const btn = document.querySelector("#check-update-btn");
-  const hint = document.querySelector("#update-hint");
-  const versionEl = document.querySelector("#app-version");
-  if (versionEl) versionEl.textContent = appVersion || "-";
-  if (!btn || !hint) return;
-  btn.textContent = updateChecking ? "检查中…" : (pendingUpdate ? "打开下载页" : "检查更新");
-  btn.disabled = updateChecking;
-  btn.dataset.action = pendingUpdate ? "open" : "check";
-  hint.textContent = updateHint;
+function saveSettings() {
+  const snapshot = captureSettings(state.settings);
+  const task = pendingSave.then(() => invoke("save_settings", { settings: snapshot }));
+  pendingSave = task.catch(() => {});
+  return task;
 }
 
-async function resolveAppVersion() {
-  if (appVersion) return;
+async function changeSetting(key, value) {
+  const previous = state.settings[key];
+  state.settings[key] = value;
   try {
-    // getVersion 返回 Promise，不 await 就把一个 Promise 写进文本里了。
-    appVersion = (await window.__TAURI__?.app?.getVersion?.()) || "";
-  } catch (err) {
-    /* 浏览器预览里没有这个 API，留占位符 */
-  }
-  renderUpdateRow();
-}
-
-async function runUpdateCheck({ silent = false } = {}) {
-  const seq = ++updateSeq;
-  const isCurrent = () => seq === updateSeq;
-  updateChecking = true;
-  if (!silent) updateHint = "";
-  renderUpdateRow();
-
-  let info = null;
-  try {
-    info = await invoke("check_update");
-  } catch (err) {
-    if (!isCurrent()) return;
-    updateChecking = false;
-    if (!silent) updateHint = "检查失败，稍后再试";
-    renderUpdateRow();
-    return;
-  }
-  if (!isCurrent()) return;
-
-  updateChecking = false;
-  if (info && info.current) appVersion = info.current;
-  if (info && isNewerVersion(info.latest, info.current)) {
-    pendingUpdate = info;
-    // 静默那次也要把「有新版本」写在提示里：这行本来就是给用户看的。
-    updateHint = "有新版本 " + info.latest;
-  } else {
-    pendingUpdate = null;
-    if (!silent) updateHint = info ? "已是最新" : "查不到，稍后再试";
-  }
-  renderUpdateRow();
-}
-
-function bindUpdateRow() {
-  const btn = document.querySelector("#check-update-btn");
-  if (!btn) return;
-  btn.addEventListener("click", e => {
-    e.stopPropagation();
-    if (e.currentTarget.dataset.action === "open") {
-      invoke("open_release_page").catch(() => {});
-      return;
-    }
-    if (!updateChecking) runUpdateCheck();
-  });
-  // renderMain() 会整块换掉 innerHTML，所以每次重渲染都要把状态补回新节点，
-  // 而不是等下一次检查才把「打开下载页」显示出来。
-  renderUpdateRow();
-  resolveAppVersion();
-  if (!silentUpdateStarted) {
-    silentUpdateStarted = true;
-    runUpdateCheck({ silent: true });
-  }
-}
-
-async function bindMainListeners() {
-  if (state.listenersBound || mode !== "main") return;
-  if (!listen) {
-    state.listenersBound = true;
-    return;
-  }
-  await listen("workflow:state", (event) => {
-    const p = event.payload || {};
-    state.loading = Boolean(p.busy);
-    if (typeof p.message === "string") { state.status = p.message; state.statusType = p.type || ""; }
-    if (!p.busy && (!p.message || p.type === "error")) {
-      setCapturePreparing(false);
-    }
-    updateOutputArea();
-  });
-  await listen("main:focus-text-input", () => {
-    focusTextInputIfAllowed({
-      mode,
-      hotkeyRecording: state.hotkeyRecording,
-      input: document.querySelector("#text-input"),
-    });
-  });
-  state.listenersBound = true;
-}
-
-/* ── Main view render ── */
-
-function renderMain() {
-  if (!state.settings) {
-    app.innerHTML = `<div class="bento-app"><div class="block" style="padding:20px"><span class="status-text">正在加载…</span></div></div>`;
-    return;
-  }
-
-  app.innerHTML = `
-    <div class="bento-app${state.settingsOpen ? " settings-open" : ""}">
-      <div class="block header-block" data-tauri-drag-region>
-        <div class="header-left">
-          <div class="app-title">Glance</div>
-          <div class="lang-pill">
-            <select id="from-lang">${languageOptions(state.settings.fromLang)}</select>
-            <button type="button" class="lang-swap" id="lang-swap" title="交换源语言和目标语言" aria-label="交换源语言和目标语言">⇄</button>
-            <select id="to-lang">${languageOptions(state.settings.toLang)}</select>
-          </div>
-        </div>
-        <div class="header-right">
-          <button class="pin-btn${state.settings.pinOnTop ? " on" : ""}" id="pin-btn" title="置顶窗口" aria-label="置顶窗口" aria-pressed="${state.settings.pinOnTop ? "true" : "false"}"><svg class="pin-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><rect x="3" y="2.2" width="10" height="4.4" rx="1.8"/><rect x="7" y="6.2" width="2" height="5.4" rx="1"/><path d="M6.3 11.6h3.4L8 14.4z"/></svg></button>
-          <button class="capture-btn" id="capture-btn" title="截图翻译">⛶ <span class="btn-label">截图翻译</span></button>
-          <button class="settings-btn" id="settings-btn" title="设置">⚙</button>
-        </div>
-      </div>
-
-      <div class="block text-block">
-        <div class="text-col input-col">
-          <div class="input-wrap">
-            <textarea class="input-area" id="text-input" placeholder="输入要翻译的文本..." rows="3"></textarea>
-          </div>
-          <div class="meta-info">
-            <span class="detect-tag" id="detected-lang" style="display:none"></span>
-            <button class="tts-btn ${state.ttsPlaying ? "speaking" : ""}" id="tts-btn" title="朗读">🔊</button>
-          </div>
-        </div>
-        <div class="text-col output-col">
-          <div class="output-wrap" id="output-wrap">
-            <div class="output-primary" id="output-primary"></div>
-            <div class="output-alternatives" id="output-alternatives"></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-panel" id="settings-panel" style="${state.settingsOpen ? "" : "display:none"}">
-        <div class="settings-section">
-          <div class="settings-row">
-            <span class="settings-label">翻译引擎</span>
-            <div class="engine-switcher" id="engine-switcher">
-              ${TRANSLATE_ENGINES.map(e =>
-                `<button class="engine-btn ${state.settings.textTranslateEngine === e.value ? "active" : ""}" data-engine="${e.value}">${e.label}</button>`
-              ).join("")}
-            </div>
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">网络代理</span>
-            <div class="engine-switcher" id="proxy-switcher">
-              ${PROXY_MODES.map(p =>
-                `<button class="engine-btn ${state.settings.proxyMode === p.value ? "active" : ""}" data-proxy="${p.value}">${p.label}</button>`
-              ).join("")}
-            </div>
-          </div>
-          <div class="settings-row" id="custom-proxy-row" style="${state.settings.proxyMode === "custom" ? "" : "display:none"}">
-            <span class="settings-label">代理地址</span>
-            <input class="settings-input" id="custom-proxy" type="text"
-                    value="${escapeHtml(state.settings.customProxy || "")}"
-                    placeholder="http://127.0.0.1:7890" />
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">开机自启</span>
-            <button class="toggle ${state.settings.autostart ? "on" : ""}" id="autostart" aria-pressed="${state.settings.autostart}"></button>
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">截图翻译</span>
-            <div class="shortcut-row settings-shortcut" id="shortcut-row">
-              快捷键: ${state.settings.hotkey ? shortcutKeysHtml(state.settings.hotkey) : "未设置"} <span class="shortcut-hint">点击可设置</span>
-            </div>
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">截图复制</span>
-            <div class="shortcut-row settings-shortcut" id="copy-shortcut-row">
-              快捷键: ${state.settings.copyHotkey ? shortcutKeysHtml(state.settings.copyHotkey) : "未设置"} <span class="shortcut-hint">点击可设置</span>
-            </div>
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">弹出窗口</span>
-            <div class="shortcut-row settings-shortcut" id="popup-shortcut-row">
-              ${state.settings.popupShortcut ? shortcutKeysHtml(state.settings.popupShortcut) : "未设置"} <span class="shortcut-hint">点击可设置</span>
-            </div>
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">版本</span>
-            <div class="update-row">
-              <span class="settings-hint" id="app-version">-</span>
-              <button type="button" class="update-btn" id="check-update-btn">检查更新</button>
-              <span class="settings-hint" id="update-hint"></span>
-            </div>
-          </div>
-        </div>
-        <div class="settings-section" id="llm-settings" style="${state.settings.textTranslateEngine === "llm" ? "" : "display:none"}">
-          <div class="settings-row">
-            <span class="settings-label">API 地址 (OpenAI)</span>
-            <input class="settings-input" id="llm-base-url" type="text"
-                    value="${escapeHtml(state.settings.llmConfig.baseUrl)}"
-                    placeholder="https://api.openai.com/v1/chat/completions" />
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">API Key</span>
-            <input class="settings-input" id="llm-api-key" type="password"
-                    value="${escapeHtml(state.settings.llmConfig.apiKey)}"
-                    placeholder="sk-..." />
-          </div>
-          <div class="settings-row">
-            <span class="settings-label">模型</span>
-            <input class="settings-input" id="llm-model" type="text"
-                    value="${escapeHtml(state.settings.llmConfig.model)}"
-                    placeholder="gpt-4o-mini" />
-          </div>
-          <div class="settings-row settings-row-vertical">
-            <span class="settings-label">提示词（指定源语言）
-              <span class="settings-hint">可用 {from} / {to} 表示源/目标语言</span>
-            </span>
-            <textarea class="settings-input settings-textarea" id="llm-prompt" rows="4"
-                    placeholder="${escapeHtml(defaultSettings().llmConfig.prompt)}">${escapeHtml(state.settings.llmConfig.prompt || "")}</textarea>
-          </div>
-          <div class="settings-row settings-row-vertical">
-            <span class="settings-label">提示词（自动检测源语言）
-              <span class="settings-hint">源语言为“自动检测”时使用，可用 {to}</span>
-            </span>
-            <textarea class="settings-input settings-textarea" id="llm-auto-prompt" rows="4"
-                    placeholder="${escapeHtml(defaultSettings().llmConfig.autoPrompt)}">${escapeHtml(state.settings.llmConfig.autoPrompt || "")}</textarea>
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  // Restore input
-  const inp = document.querySelector("#text-input");
-  inp.value = state.inputText;
-
-// Events
-  // Tracked IME state: `input` events keep firing while the user is still
-  // picking candidates, so the events alone are not enough to know when text
-  // has actually been committed. See ./ime-guards.mjs.
-  let composing = false;
-  inp.addEventListener("compositionstart", () => { composing = true; });
-  inp.addEventListener("compositionend", () => {
-    composing = false;
-    state.inputText = inp.value;
-    debouncedTranslate();
-  });
-  inp.addEventListener("input", e => {
-    state.inputText = e.target.value;
-    // Translate committed text only — never the raw pinyin/kana buffer.
-    if (!shouldTranslateOnInput(e, composing)) return;
-    debouncedTranslate();
-  });
-  inp.addEventListener("keydown", e => {
-    // While the IME owns the keystroke, Enter belongs to the composition: let it
-    // through untouched so the candidate is committed instead of being eaten by
-    // preventDefault() (which also translated the unfinished buffer).
-    if (!shouldTranslateOnEnter(e, composing)) return;
-    e.preventDefault();
-    translateText();
-  });
-  inp.addEventListener("paste", () => {
-    setTimeout(() => {
-      state.inputText = inp.value;
-      translateText();
-    }, 0);
-  });
-  // Switching language re-translates right away — no Enter needed.
-  document.querySelector("#from-lang").addEventListener("change", e => { state.settings.fromLang = e.target.value; saveSettings().catch(()=>{}); retranslateNow().catch(()=>{}); });
-  document.querySelector("#to-lang").addEventListener("change", e => { state.settings.toLang = e.target.value; saveSettings().catch(()=>{}); retranslateNow().catch(()=>{}); });
-  document.querySelector("#lang-swap").addEventListener("click", e => {
-    e.stopPropagation();
-    swapLanguages();
-  });
-
-  document.querySelector("#settings-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    state.settingsOpen = !state.settingsOpen;
-    const panel = document.querySelector("#settings-panel");
-    const btn = e.currentTarget;
-    panel.style.display = state.settingsOpen ? "" : "none";
-    document.querySelector(".bento-app")?.classList.toggle("settings-open", state.settingsOpen);
-    btn.classList.toggle("open", state.settingsOpen);
-    if (state.settingsOpen) {
-      invoke?.("resize_main_window", { height: settingsHeight() }).catch(() => {});
-    } else {
-      invoke?.("resize_main_window", { height: 400 }).catch(() => {});
-    }
-  });
-
-  document.querySelector("#autostart").addEventListener("click", e => {
-    state.settings.autostart = !state.settings.autostart;
-    e.currentTarget.classList.toggle("on", state.settings.autostart);
-    e.currentTarget.setAttribute("aria-pressed", state.settings.autostart);
-    saveSettings().catch(() => {});
-  });
-  document.querySelector("#tts-btn").addEventListener("click", speakInput);
-
-  // 版本 / 检查更新
-  bindUpdateRow();
-
-  // 置顶：状态从 settings 走，按钮高亮和窗口实际 topmost 都由 applyPin 同步。
-  document.querySelector("#pin-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    state.settings.pinOnTop = !state.settings.pinOnTop;
-    applyPin();
-    saveSettings().catch(() => {});
-  });
-  document.querySelector("#capture-btn").addEventListener("click", e => { e.stopPropagation(); startCapture(); });
-  document.querySelector("#shortcut-row").addEventListener("click", e => { e.stopPropagation(); startHotkeyRecording(); });
-  document.querySelector("#copy-shortcut-row").addEventListener("click", e => { e.stopPropagation(); startCopyHotkeyRecording(); });
-  document.querySelector("#popup-shortcut-row").addEventListener("click", e => { e.stopPropagation(); startPopupShortcutRecording(); });
-
-  // Engine switcher
-  document.querySelectorAll("#engine-switcher .engine-btn").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      const newEngine = e.currentTarget.dataset.engine;
-      state.settings.textTranslateEngine = newEngine;
-      // The engine is read from the saved settings by the Rust side, so this one
-      // waits for the write before re-running the translation.
-      retranslateNow({ awaitPersisted: true }).catch(() => {});
-      // Update active state
-      document.querySelectorAll("#engine-switcher .engine-btn").forEach(b => b.classList.toggle("active", b.dataset.engine === newEngine));
-      // Toggle LLM settings visibility
-      const llmSettings = document.querySelector("#llm-settings");
-      if (llmSettings) llmSettings.style.display = newEngine === "llm" ? "" : "none";
-      // Resize window only while the settings panel is open; otherwise keep the
-      // compact translation view unchanged.
-      if (state.settingsOpen) {
-        invoke?.("resize_main_window", { height: settingsHeight() }).catch(() => {});
-      }
-    });
-  });
-
-  // Proxy mode switcher
-  document.querySelectorAll("#proxy-switcher .engine-btn").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      const newMode = e.currentTarget.dataset.proxy;
-      state.settings.proxyMode = newMode;
-      saveSettings().catch(() => {});
-      document.querySelectorAll("#proxy-switcher .engine-btn").forEach(b => b.classList.toggle("active", b.dataset.proxy === newMode));
-      const customRow = document.querySelector("#custom-proxy-row");
-      if (customRow) customRow.style.display = newMode === "custom" ? "" : "none";
-      if (state.settingsOpen) {
-        invoke?.("resize_main_window", { height: settingsHeight() }).catch(() => {});
-      }
-    });
-  });
-  const customProxyInput = document.querySelector("#custom-proxy");
-  if (customProxyInput) customProxyInput.addEventListener("change", e => { state.settings.customProxy = e.target.value.trim(); saveSettings().catch(() => {}); });
-
-  // LLM config inputs
-  const baseUrlInput = document.querySelector("#llm-base-url");
-  const apiKeyInput = document.querySelector("#llm-api-key");
-  const modelInput = document.querySelector("#llm-model");
-  const promptInput = document.querySelector("#llm-prompt");
-  const autoPromptInput = document.querySelector("#llm-auto-prompt");
-  if (baseUrlInput) baseUrlInput.addEventListener("change", e => { state.settings.llmConfig.baseUrl = e.target.value.trim(); saveSettings().catch(() => {}); });
-  if (apiKeyInput) apiKeyInput.addEventListener("change", e => { state.settings.llmConfig.apiKey = e.target.value.trim(); saveSettings().catch(() => {}); });
-  if (modelInput) modelInput.addEventListener("change", e => { state.settings.llmConfig.model = e.target.value.trim(); saveSettings().catch(() => {}); });
-  if (promptInput) promptInput.addEventListener("change", e => { state.settings.llmConfig.prompt = e.target.value; saveSettings().catch(() => {}); });
-  if (autoPromptInput) autoPromptInput.addEventListener("change", e => { state.settings.llmConfig.autoPrompt = e.target.value; saveSettings().catch(() => {}); });
-
-  // 启动时把已保存的置顶状态回写到窗口上（Rust 侧 setup 阶段窗口可能还没建好）。
-  applyPin();
-  inp.focus();
-}
-
-/* ── Partial DOM updates ── */
-
-function updateOutputArea() {
-  const primaryEl = document.querySelector("#output-primary");
-  const altEl = document.querySelector("#output-alternatives");
-  if (!primaryEl) return;
-
-  if (state.textLoading) {
-    primaryEl.innerHTML = `<span class="dot-loading"><span></span><span></span><span></span></span> 翻译中…`;
-    if (altEl) altEl.innerHTML = "";
-  } else if (state.translatedText) {
-    primaryEl.textContent = state.translatedText;
-    if (altEl && state.alternatives.length > 0) {
-      altEl.innerHTML = state.alternatives
-        .map(a => `<span class="alt-tag">${escapeHtml(a)}</span>`)
-        .join("");
-    } else if (altEl) {
-      altEl.innerHTML = "";
-    }
-  } else if (state.loading && state.status) {
-    primaryEl.textContent = state.status;
-    if (altEl) altEl.innerHTML = "";
-  } else if (state.status) {
-    primaryEl.textContent = state.status;
-    if (altEl) altEl.innerHTML = "";
-  } else {
-    primaryEl.textContent = "";
-    if (altEl) altEl.innerHTML = "";
-  }
-
-  const btn = document.querySelector("#capture-btn");
-  if (btn) btn.disabled = state.loading;
-}
-
-function updateDetectedLang() {
-  const el = document.querySelector("#detected-lang");
-  if (!el) return;
-  if (state.detectedLang) {
-    const label = LANGUAGES.find(l => l.value === state.detectedLang)?.label || state.detectedLang;
-    el.textContent = `检测: ${label}`;
-    el.style.display = "";
-  } else {
-    el.style.display = "none";
-  }
-}
-
-/* ── Actions ── */
-
-async function startCapture() {
-  if (state.loading) return;
-  try {
-    state.loading = true;
     await saveSettings();
-    setCapturePreparing(true);
-    document.activeElement?.blur?.();
-    await waitForNextPaint();
-    await invoke("begin_capture", { options: { fromLang: state.settings.fromLang, toLang: state.settings.toLang } });
-  } catch (err) {
-    setCapturePreparing(false);
-    state.loading = false;
-    state.status = String(err);
-    state.statusType = "error";
-    updateOutputArea();
+    state.status = "设置已保存";
+    state.statusType = "";
+  } catch (error) {
+    if (state.settings[key] === value) state.settings[key] = previous;
+    showError(error);
   }
-}
-
-async function translateText() {
-  const text = state.inputText.trim();
-  if (!text) return;
-
-  // Claim this as the latest request; older in-flight ones become stale.
-  const seq = ++translateSeq;
-
-  state.textLoading = true;
-  state.translatedText = "";
-  state.alternatives = [];
-  state.detectedLang = "";
-  updateOutputArea();
-
-  // Validate LLM config
-  if (state.settings.textTranslateEngine === "llm" && !state.settings.llmConfig.apiKey) {
-    if (seq === translateSeq) {
-      state.textLoading = false;
-      state.status = "请先在设置中配置 API Key";
-      state.statusType = "error";
-      updateOutputArea();
-    }
-    return;
-  }
-
-  try {
-    const r = await invoke("translate_text", { text, fromLang: state.settings.fromLang, toLang: state.settings.toLang });
-    if (seq !== translateSeq) return; // superseded by a newer request
-    state.translatedText = r.translatedText;
-    state.alternatives = r.alternatives || [];
-    state.detectedLang = r.fromLangDetected;
-    updateDetectedLang();
-  } catch (err) {
-    if (seq !== translateSeq) return; // superseded; ignore stale error
-    state.status = String(err);
-    state.statusType = "error";
-  } finally {
-    // Only the latest request controls the loading state / final render.
-    if (seq === translateSeq) {
-      state.textLoading = false;
-      updateOutputArea();
-    }
-  }
-}
-
-function speakInput() {
-  const text = state.inputText.trim();
-  if (!text) return;
-
-  if (window.speechSynthesis.speaking) {
-    window.speechSynthesis.cancel();
-    state.ttsPlaying = false;
-    const btn = document.querySelector("#tts-btn");
-    if (btn) btn.classList.remove("speaking");
-    return;
-  }
-
-  const utt = new SpeechSynthesisUtterance(text);
-  const fromLang = state.detectedLang || state.settings.fromLang;
-  utt.lang = TTS_LANG_MAP[fromLang] || fromLang;
-  utt.onend = () => { state.ttsPlaying = false; const b = document.querySelector("#tts-btn"); if (b) b.classList.remove("speaking"); };
-  utt.onerror = utt.onend;
-
-  state.ttsPlaying = true;
-  const btn = document.querySelector("#tts-btn");
-  if (btn) btn.classList.add("speaking");
-  window.speechSynthesis.speak(utt);
-}
-
-/* ── Hotkey recorder ── */
-
-const KEY_MAP = {
-  " ":"Space","ArrowUp":"Up","ArrowDown":"Down","ArrowLeft":"Left","ArrowRight":"Right",
-  "Escape":"Escape","Enter":"Return","Tab":"Tab","Backspace":"Backspace",
-  "Delete":"Delete","Insert":"Insert","Home":"Home","End":"End",
-  "PageUp":"PageUp","PageDown":"PageDown",
-  "F1":"F1","F2":"F2","F3":"F3","F4":"F4","F5":"F5","F6":"F6",
-  "F7":"F7","F8":"F8","F9":"F9","F10":"F10","F11":"F11","F12":"F12",
-};
-
-function startHotkeyRecording() {
-  if (state.hotkeyRecording) return;
-  state.hotkeyRecording = true;
-  const row = document.querySelector("#shortcut-row");
-  if (!row) return;
-  row.classList.add("recording");
-  row.innerHTML = `按下快捷键…`;
-
-  function onKey(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    const mods = [];
-    if (e.ctrlKey) mods.push("CommandOrControl");
-    if (e.altKey) mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (e.metaKey) mods.push("Super");
-    if (["Control","Alt","Shift","Meta"].includes(e.key)) return;
-    if (e.key === "Escape") { finishRecording(null); return; }
-    let key = KEY_MAP[e.key] || (e.key.length === 1 ? e.key.toUpperCase() : null);
-    if (!key) {
-      return;
-    }
-    finishRecording([...mods, key].join("+"));
-  }
-
-  function finishRecording(combo) {
-    document.removeEventListener("keydown", onKey, true);
-    state.hotkeyRecording = false;
-    if (combo) {
-      state.settings.hotkey = combo;
-      saveSettings().catch(() => {});
-    }
-    const r = document.querySelector("#shortcut-row");
-    if (r) {
-      r.classList.remove("recording");
-      r.innerHTML = `快捷键: ${shortcutKeysHtml(state.settings.hotkey)} <span class="shortcut-hint">点击可设置快捷键</span>`;
-    }
-  }
-
-  document.addEventListener("keydown", onKey, true);
-}
-
-function startCopyHotkeyRecording() {
-  if (state.hotkeyRecording) return;
-  state.hotkeyRecording = true;
-  const row = document.querySelector("#copy-shortcut-row");
-  if (!row) return;
-  row.classList.add("recording");
-  row.innerHTML = `按下快捷键…`;
-
-  function onKey(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    const mods = [];
-    if (e.ctrlKey) mods.push("CommandOrControl");
-    if (e.altKey) mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (e.metaKey) mods.push("Super");
-    if (["Control","Alt","Shift","Meta"].includes(e.key)) return;
-    if (e.key === "Escape") { finishRecording(null); return; }
-    let key = KEY_MAP[e.key] || (e.key.length === 1 ? e.key.toUpperCase() : null);
-    if (!key) {
-      return;
-    }
-    finishRecording([...mods, key].join("+"));
-  }
-
-  function finishRecording(combo) {
-    document.removeEventListener("keydown", onKey, true);
-    state.hotkeyRecording = false;
-    if (combo) {
-      state.settings.copyHotkey = combo;
-      saveSettings().catch(() => {});
-    }
-    const r = document.querySelector("#copy-shortcut-row");
-    if (r) {
-      r.classList.remove("recording");
-      r.innerHTML = `快捷键: ${shortcutKeysHtml(state.settings.copyHotkey)} <span class="shortcut-hint">点击可设置</span>`;
-    }
-  }
-
-  document.addEventListener("keydown", onKey, true);
-}
-
-function startPopupShortcutRecording() {
-  if (state.hotkeyRecording) return;
-  state.hotkeyRecording = true;
-  const row = document.querySelector("#popup-shortcut-row");
-  if (!row) return;
-  row.classList.add("recording");
-  row.innerHTML = `按下快捷键…`;
-
-  function onKey(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    const mods = [];
-    if (e.ctrlKey) mods.push("CommandOrControl");
-    if (e.altKey) mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (e.metaKey) mods.push("Super");
-    if (["Control","Alt","Shift","Meta"].includes(e.key)) return;
-    if (e.key === "Escape") { finishRecording(null); return; }
-    let key = KEY_MAP[e.key] || (e.key.length === 1 ? e.key.toUpperCase() : null);
-    if (!key) {
-      return;
-    }
-    finishRecording([...mods, key].join("+"));
-  }
-
-  function finishRecording(combo) {
-    document.removeEventListener("keydown", onKey, true);
-    state.hotkeyRecording = false;
-    state.settings.popupShortcut = combo || null;
-    saveSettings().catch(() => {});
-    const r = document.querySelector("#popup-shortcut-row");
-    if (r) {
-      r.classList.remove("recording");
-      const display = state.settings.popupShortcut ? shortcutKeysHtml(state.settings.popupShortcut) : "未设置";
-      r.innerHTML = `${display} <span class="shortcut-hint">点击可设置</span>`;
-    }
-  }
-
-  document.addEventListener("keydown", onKey, true);
-}
-
-/* ── Overlay (unchanged) ── */
-
-async function renderOverlay() {
-  app.innerHTML = `<div class="overlay-root"><div id="overlay-stage"></div></div>`;
-  window.addEventListener("keydown", e => { if (e.key === "Escape") invoke("close_overlay"); });
-  try {
-    state.overlay = await invoke("load_overlay_payload");
-    if (state.overlay.closeOnOutsideClick) {
-      document.querySelector(".overlay-root").addEventListener("click", () => invoke("close_overlay"));
-    }
-    const s = state.overlay.selection;
-    const src = `data:image/jpeg;base64,${state.overlay.renderedImageBase64}`;
-    const dpr = window.devicePixelRatio || 1;
-    document.querySelector("#overlay-stage").innerHTML = `
-      <img class="overlay-image" src="${src}" alt="translated"
-           style="left:${s.x/dpr}px;top:${s.y/dpr}px;width:${s.width/dpr}px;height:${s.height/dpr}px;opacity:${state.overlay.overlayOpacity};" />`;
-  } catch (err) { renderFatal(`覆盖层初始化失败: ${err}`); }
-}
-
-/* ── Boot ── */
-
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && mode === "main" && !state.hotkeyRecording) {
-    invoke?.("hide_window");
-  }
-});
-
-window.addEventListener("focus", () => {
-  if (mode === "main") {
-    setCapturePreparing(false);
-  }
-});
-
-async function boot() {
-  if (mode === "main") {
-    renderMain();
-  } else if (app) {
-    app.innerHTML = `<div class="overlay-root"><div class="capture-error-screen">正在初始化…</div></div>`;
-  }
-  await ensureTauriApi();
-  await bindMainListeners();
-  if (mode.startsWith("overlay")) { await renderOverlay(); return; }
-  try {
-    await loadSettings();
-  } catch (err) {
-    console.error("load_settings failed, falling back to defaults", err);
-    state.settings = defaultSettings();
-    state.status = `设置加载失败，已使用默认配置: ${err instanceof Error ? err.message : String(err)}`;
-    state.statusType = "error";
-  }
-  invoke?.("resize_main_window", { height: 400 }).catch(() => {});
   renderMain();
 }
 
-window.addEventListener("error", e => renderFatal(e.error?.message || e.message || "unknown"));
-window.addEventListener("unhandledrejection", e => renderFatal(e.reason instanceof Error ? e.reason.message : String(e.reason)));
-boot().catch(e => renderFatal(e instanceof Error ? e.message : String(e)));
+function languageOptions(selected, target = false) {
+  return LANGUAGES.filter(([value]) => !target || value !== "auto").map(([value, label]) =>
+    `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function renderMain() {
+  if (!state.settings) {
+    app.innerHTML = '<main class="screen-app"><section class="card loading-card">正在加载…</section></main>';
+    return;
+  }
+  const settings = state.settings;
+  app.innerHTML = `
+    <main class="screen-app">
+      <header class="app-header" data-tauri-drag-region>
+        <div class="brand"><span class="brand-icon">${icon("capture")}</span><div><h1>ScreenTrans</h1><p>截图翻译 · 截图取字</p></div></div>
+        <div class="header-actions">
+          <button class="icon-button ${settings.pinOnTop ? "active" : ""}" id="pin-btn" title="${settings.pinOnTop ? "取消置顶" : "置顶窗口"}" aria-label="${settings.pinOnTop ? "取消置顶" : "置顶窗口"}" aria-pressed="${settings.pinOnTop}">${icon("pin")}</button>
+          <button class="icon-button ${state.settingsOpen ? "active" : ""}" id="settings-btn" title="基础设置" aria-label="基础设置" aria-expanded="${state.settingsOpen}" aria-controls="settings-panel">${icon("settings")}</button>
+        </div>
+      </header>
+      <section class="card capture-card" aria-label="截图操作">
+        <div class="language-row">
+          <label class="language-field"><span>源语言</span><select id="from-lang" aria-label="源语言">${languageOptions(settings.fromLang)}</select></label>
+          <button class="swap-button" id="lang-swap" title="交换源语言和目标语言" aria-label="交换源语言和目标语言">⇄</button>
+          <label class="language-field"><span>目标语言</span><select id="to-lang" aria-label="目标语言">${languageOptions(settings.toLang, true)}</select></label>
+        </div>
+        <div class="capture-actions">
+          <button class="action-button primary" data-capture="begin_capture">${icon("capture")}<span class="action-label">截图翻译</span><span class="action-shortcut">${shortcutHtml(settings.hotkey)}</span></button>
+          <button class="action-button secondary" data-capture="begin_copy_capture">${icon("copy")}<span class="action-label">截图取字</span><span class="action-shortcut">${shortcutHtml(settings.copyHotkey)}</span></button>
+        </div>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </section>
+      <section class="card settings-card" id="settings-panel" aria-label="基础设置" ${state.settingsOpen ? "" : "hidden"}>
+        <div class="setting-row"><div><span class="setting-label">开机自启</span><p class="setting-description">启动后静默进入系统托盘</p></div><button class="toggle ${settings.autostart ? "on" : ""}" id="autostart" role="switch" aria-label="开机自启" aria-checked="${settings.autostart}"></button></div>
+        <div class="setting-row"><label class="setting-label" for="shortcut-row">截图翻译</label><button class="shortcut-button" id="shortcut-row" title="点击修改快捷键">${shortcutHtml(settings.hotkey)}<span class="shortcut-hint">修改</span></button></div>
+        <div class="setting-row"><label class="setting-label" for="copy-shortcut-row">截图取字</label><button class="shortcut-button" id="copy-shortcut-row" title="点击修改快捷键">${shortcutHtml(settings.copyHotkey)}<span class="shortcut-hint">修改</span></button></div>
+      </section>
+      <footer class="app-footer">关闭窗口后继续驻留托盘</footer>
+    </main>`;
+  updateStatus();
+  document.querySelector("#from-lang").addEventListener("change", event => { void changeSetting("fromLang", event.target.value); });
+  document.querySelector("#to-lang").addEventListener("change", event => { void changeSetting("toLang", event.target.value); });
+  document.querySelector("#lang-swap").addEventListener("click", async () => {
+    const previous = { ...state.settings };
+    Object.assign(state.settings, swappedLanguages(settings.fromLang, settings.toLang));
+    try { await saveSettings(); } catch (error) { state.settings = previous; showError(error); }
+    renderMain();
+  });
+  document.querySelector("#autostart").addEventListener("click", () => { void changeSetting("autostart", !settings.autostart); });
+  document.querySelector("#pin-btn").addEventListener("click", () => { void changeSetting("pinOnTop", !settings.pinOnTop); });
+  document.querySelector("#settings-btn").addEventListener("click", () => { state.settingsOpen = !state.settingsOpen; renderMain(); void fitWindowToContent().catch(showError); });
+  document.querySelectorAll("[data-capture]").forEach(button => button.addEventListener("click", () => { void startCapture(button.dataset.capture); }));
+  document.querySelector("#shortcut-row").addEventListener("click", () => recordShortcut("hotkey", "#shortcut-row"));
+  document.querySelector("#copy-shortcut-row").addEventListener("click", () => recordShortcut("copyHotkey", "#copy-shortcut-row"));
+}
+
+async function fitWindowToContent() {
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  const content = document.querySelector(".screen-app");
+  if (content) await invoke("resize_main_window", { height: Math.max(240, Math.min(640, Math.ceil(content.getBoundingClientRect().height))) });
+}
+
+async function startCapture(command) {
+  if (state.busy || state.recording) return;
+  state.busy = true;
+  updateStatus();
+  try {
+    await saveSettings();
+    setCapturePreparing(true);
+    document.activeElement?.blur();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await invoke(command);
+  } catch (error) {
+    state.busy = false;
+    setCapturePreparing(false);
+    showError(error);
+  }
+}
+
+function recordShortcut(field, selector) {
+  if (state.recording) return;
+  const button = document.querySelector(selector);
+  state.recording = field;
+  button.classList.add("recording");
+  button.textContent = "按下组合键…";
+  state.status = "按 Esc 取消，按 Backspace 清除快捷键";
+  state.statusType = "";
+  updateStatus();
+  const finish = value => {
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("blur", cancel);
+    state.recording = null;
+    state.status = "";
+    if (value !== null) void changeSetting(field, value);
+    else renderMain();
+  };
+  const cancel = () => finish(null);
+  const onKey = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") return finish(null);
+    if (event.key === "Backspace" && !event.ctrlKey && !event.altKey && !event.metaKey) return finish("");
+    const shortcut = shortcutFromEvent(event);
+    if (!shortcut) return;
+    const other = field === "hotkey" ? "copyHotkey" : "hotkey";
+    if (sameShortcut(shortcut, state.settings[other])) {
+      state.status = "截图翻译和截图取字需要使用不同的快捷键";
+      state.statusType = "error";
+      updateStatus();
+      return;
+    }
+    finish(shortcut);
+  };
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("blur", cancel, { once: true });
+}
+
+async function renderOverlay() {
+  const payload = await invoke("load_overlay_payload");
+  const selection = payload.selection;
+  const ratio = window.devicePixelRatio || 1;
+  app.innerHTML = '<div class="overlay-root"><img class="overlay-image" alt="截图翻译结果"></div>';
+  const image = document.querySelector(".overlay-image");
+  image.src = `data:image/jpeg;base64,${payload.renderedImageBase64}`;
+  Object.assign(image.style, { left: `${selection.x / ratio}px`, top: `${selection.y / ratio}px`, width: `${selection.width / ratio}px`, height: `${selection.height / ratio}px`, opacity: payload.overlayOpacity });
+  if (payload.closeOnOutsideClick) document.querySelector(".overlay-root").addEventListener("click", () => { void invoke("close_overlay"); });
+  window.addEventListener("keydown", event => { if (event.key === "Escape") void invoke("close_overlay"); });
+}
+
+async function boot() {
+  if (mode === "main") renderMain();
+  await ensureTauriApi();
+  if (mode.startsWith("overlay")) return renderOverlay();
+  state.settings = captureSettings(await invoke("load_settings"));
+  if (listen) await listen("workflow:state", event => {
+    const payload = event.payload || {};
+    state.busy = Boolean(payload.busy);
+    state.status = payload.message || "";
+    state.statusType = payload.type || "";
+    if (!state.busy) setCapturePreparing(false);
+    updateStatus();
+  });
+  renderMain();
+  await fitWindowToContent();
+}
+
+window.addEventListener("focus", () => setCapturePreparing(false));
+document.addEventListener("keydown", event => { if (event.key === "Escape" && mode === "main" && !state.recording) void invoke?.("hide_window"); });
+boot().catch(error => {
+  app.innerHTML = `<main class="screen-app"><section class="card loading-card"><p class="error">启动失败：${escapeHtml(error instanceof Error ? error.message : error)}</p><button class="retry-button">重试</button></section></main>`;
+  document.querySelector(".retry-button").addEventListener("click", () => location.reload());
+});

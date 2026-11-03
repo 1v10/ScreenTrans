@@ -2,179 +2,33 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TextTranslateEngine {
-    Bing,
-    Google,
-    Microsoft,
-    Transmart,
-    Yandex,
-    Iciba,
-    Llm,
-}
-
-impl Default for TextTranslateEngine {
-    fn default() -> Self {
-        Self::Bing
-    }
-}
-
-/// How outbound requests to the built-in translation engines should be proxied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProxyMode {
-    /// No proxy — connect directly.
-    None,
-    /// Use the OS system proxy (Windows Internet Settings / proxy app).
-    System,
-    /// Use a user-supplied proxy URL (see `custom_proxy`).
-    Custom,
-}
-
-impl Default for ProxyMode {
-    fn default() -> Self {
-        Self::System
-    }
-}
-
+/// Preferences shared by screen translation and screenshot text extraction.
+/// Unknown legacy text-engine fields are ignored when loading an older config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmConfig {
-    #[serde(default = "default_llm_base_url")]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default = "default_llm_model")]
-    pub model: String,
-    #[serde(default = "default_llm_prompt")]
-    pub prompt: String,
-    #[serde(default = "default_llm_auto_prompt")]
-    pub auto_prompt: String,
-}
-
-fn default_llm_base_url() -> String {
-    "https://api.openai.com/v1/chat/completions".to_string()
-}
-
-fn default_llm_model() -> String {
-    "gpt-4o-mini".to_string()
-}
-
-/// Default system prompt for the LLM translation engine when the source
-/// language is explicitly chosen. Supports the placeholders `{from}` and `{to}`,
-/// which are replaced with the source and target language labels at request time.
-pub fn default_llm_prompt() -> String {
-    "You are a professional translator. Translate the following text from {from} to {to}. \
-     Only output the translation, nothing else. Do not add explanations or notes."
-        .to_string()
-}
-
-/// Default system prompt used when the source language is set to auto-detect.
-/// Only supports the `{to}` placeholder (the source language is left to the
-/// model to detect).
-pub fn default_llm_auto_prompt() -> String {
-    "You are a professional translator. Detect the source language and translate the following text to {to}. \
-     Only output the translation, nothing else. Do not add explanations or notes."
-        .to_string()
-}
-
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            base_url: default_llm_base_url(),
-            api_key: String::new(),
-            model: default_llm_model(),
-            prompt: default_llm_prompt(),
-            auto_prompt: default_llm_auto_prompt(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TranslatorSettings {
     pub from_lang: String,
     pub to_lang: String,
-    pub clientele: String,
-    pub client: String,
-    pub vendor: String,
-    pub input_channel: String,
-    pub app_version: String,
-    pub ab_test: String,
-    pub model: String,
-    pub screen: String,
-    pub os_version: String,
-    pub network: String,
-    pub mid: String,
-    pub product: String,
-    pub yduuid: String,
     pub overlay_opacity: f32,
     pub overlay_font_scale: f32,
     pub close_on_outside_click: bool,
-    #[serde(default)]
     pub autostart: bool,
-    #[serde(default = "default_hotkey")]
     pub hotkey: String,
-    #[serde(default = "default_copy_hotkey")]
     pub copy_hotkey: String,
-    #[serde(default)]
-    pub text_translate_engine: TextTranslateEngine,
-    #[serde(default)]
-    pub llm_config: LlmConfig,
-    #[serde(default)]
-    pub popup_shortcut: Option<String>,
-    #[serde(default)]
-    pub proxy_mode: ProxyMode,
-    #[serde(default)]
-    pub custom_proxy: String,
-    /// 主窗口置顶（横栏上的图钉按钮）。
-    #[serde(default)]
     pub pin_on_top: bool,
 }
 
 impl Default for TranslatorSettings {
     fn default() -> Self {
-        let (os_version, mid, product) = if cfg!(target_os = "macos") {
-            ("14.0", "macos14.0", "macdict")
-        } else if cfg!(target_os = "linux") {
-            ("Ubuntu 22.04", "linux-ubuntu", "deskdict")
-        } else {
-            ("10.0", "windows10.0", "deskdict")
-        };
-
         Self {
-            from_lang: "auto".to_string(),
-            to_lang: "zh-CHS".to_string(),
-            clientele: "deskdict".to_string(),
-            client: "deskdict".to_string(),
-            vendor: "fanyiweb_navigation".to_string(),
-            input_channel: "YoudaoDict_fanyiweb_navigation".to_string(),
-            app_version: if cfg!(target_os = "macos") {
-                "10.3.0"
-            } else {
-                "10.3.0.0"
-            }
-            .to_string(),
-            ab_test: "2".to_string(),
-            model: "default".to_string(),
-            screen: "1920*1080".to_string(),
-            os_version: os_version.to_string(),
-            network: "none".to_string(),
-            mid: mid.to_string(),
-            product: product.to_string(),
-            yduuid: uuid::Uuid::new_v4().to_string().replace("-", "")[..17].to_string(),
+            from_lang: "auto".into(),
+            to_lang: "zh-CHS".into(),
             overlay_opacity: 0.92,
             overlay_font_scale: 1.0,
             close_on_outside_click: true,
             autostart: false,
             hotkey: default_hotkey(),
             copy_hotkey: default_copy_hotkey(),
-            text_translate_engine: TextTranslateEngine::default(),
-            llm_config: LlmConfig::default(),
-            popup_shortcut: None,
-            proxy_mode: ProxyMode::default(),
-            custom_proxy: String::new(),
             pin_on_top: false,
         }
     }
@@ -288,15 +142,6 @@ pub struct TranslationHistoryItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextTranslationResult {
-    pub translated_text: String,
-    pub from_lang_detected: String,
-    #[serde(default)]
-    pub alternatives: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CaptureRect {
     pub x: u32,
     pub y: u32,
@@ -353,17 +198,4 @@ impl TranslationHistoryItem {
             pairs,
         }
     }
-}
-
-/// 一次更新检查的结果。latest 已过白名单（去 v 前缀，只留 0-9a-z.-+），谁更新交给
-/// 前端判（ui/version.mjs 里有单测），Rust 这边不做版本比较。
-/// 这里刻意没有 url 字段：要打开的地址是 commands.rs 里的常量，不让一个从前端
-/// 绕回来的字符串再去决定浏览器打开哪儿。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateInfo {
-    pub latest: String,
-    pub current: String,
-    pub notes: String,
-    pub published_at: String,
 }

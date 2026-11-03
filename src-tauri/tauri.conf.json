@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Glance",
+  "productName": "ScreenTrans",
   "version": "0.2.34",
-  "identifier": "com.harukaon.glance",
+  "identifier": "com.screen-trans.screentrans",
   "build": {
-    "beforeDevCommand": "python3 dev_server.py",
+    "beforeDevCommand": "python dev_server.py",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../ui"
   },
@@ -17,27 +17,32 @@
     "windows": [
       {
         "label": "main",
-        "title": "Glance",
+        "title": "ScreenTrans",
         "width": 520,
-        "height": 400,
+        "height": 480,
         "resizable": true,
         "center": true,
-        "minWidth": 320,
-        "minHeight": 88,
+        "minWidth": 360,
+        "minHeight": 220,
         "decorations": true,
         "shadow": true,
-        "backgroundColor": "#F3F4F6",
+        "backgroundColor": "#111111",
+        "theme": "Dark",
         "visible": false
       }
     ]
   },
   "bundle": {
     "active": true,
-    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "targets": "all"
   },
   "plugins": {
     "global-shortcut": null,
     "autostart": null
-  }
+  },
+  "mainBinaryName": "ScreenTrans"
 }

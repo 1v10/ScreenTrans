@@ -8,8 +8,8 @@ use crate::capture;
 use crate::capture_window;
 use crate::error::{AppError, AppResult};
 
-const SELF_TEST_DIR: &str = "/tmp/glance-self-test/latest";
-const SMOKE_TEST_DIR: &str = "/tmp/glance-smoke-test/latest";
+const SELF_TEST_DIR: &str = "/tmp/screentrans-self-test/latest";
+const SMOKE_TEST_DIR: &str = "/tmp/screentrans-smoke-test/latest";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,7 +146,7 @@ pub fn run_capture_smoke_test() -> AppResult<CaptureSmokeTestResult> {
         let total_started = Instant::now();
         let output_dir = reset_output_dir(PathBuf::from(SMOKE_TEST_DIR))?;
 
-        eprintln!("Glance macOS native capture smoke test is starting.");
+        eprintln!("ScreenTrans macOS native capture smoke test is starting.");
         eprintln!("Select a region in the system screenshot UI. Press Esc to cancel.");
 
         let capture_started = Instant::now();

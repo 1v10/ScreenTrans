@@ -17,16 +17,16 @@ mod tests {
 
     #[test]
     fn detects_autostart_argument() {
-        assert!(is_silent_launch(["Glance", SILENT_START_ARG]));
+        assert!(is_silent_launch(["ScreenTrans", SILENT_START_ARG]));
     }
 
     #[test]
     fn treats_normal_launch_as_visible() {
-        assert!(!is_silent_launch(["Glance"]));
+        assert!(!is_silent_launch(["ScreenTrans"]));
     }
 
     #[test]
     fn requires_an_exact_argument_match() {
-        assert!(!is_silent_launch(["Glance", "--minimized=true"]));
+        assert!(!is_silent_launch(["ScreenTrans", "--minimized=true"]));
     }
 }

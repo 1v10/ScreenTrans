@@ -1,0 +1,89 @@
+:root {
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: #e8e8e8;
+  background: #111111;
+  color-scheme: dark;
+  font-synthesis: none;
+  --bg-app: #111111;
+  --text-main: #e8e8e8;
+  --text-sub: #a0a0a0;
+  --accent: #eeeeee;
+}
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; width: 100%; height: 100%; }
+body { background: var(--bg-app); }
+button, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button, select { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, select:focus-visible { outline: 2px solid #dedede; outline-offset: 3px; }
+[hidden] { display: none !important; }
+svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.screen-app { max-width: 760px; margin: 0 auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.app-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 0 2px 2px; flex-shrink: 0; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-icon { width: 40px; height: 40px; display: grid; place-items: center; background: #252525; color: #e8e8e8; border: 1px solid #363636; border-radius: 12px; }
+.brand-icon svg { width: 23px; height: 23px; }
+h1 { font-size: 19px; line-height: 1.25; letter-spacing: -.4px; margin: 0; font-weight: 600; }
+.brand p { font-size: 11px; color: #939393; margin: 5px 0 0; }
+.header-actions { display: flex; align-items: center; gap: 6px; }
+.icon-button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 9px; background: transparent; color: #9d9d9d; }
+.icon-button svg { width: 17px; height: 17px; }
+.icon-button:hover { background: #292929; color: #f3f3f3; }
+.icon-button.active { color: #f3f3f3; background: #303030; }
+.card { background: #1b1b1b; border-radius: 16px; border: 1px solid #333333; }
+.capture-card { padding: 14px 16px 10px; }
+.language-row { display: grid; grid-template-columns: 1fr 35px 1fr; align-items: center; gap: 10px; }
+.language-field { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.language-field > span { color: #a0a0a0; font-size: 11px; padding-left: 1px; }
+.language-field select { width: 100%; min-width: 0; border: 1px solid #373737; background: #242424; color: #e5e5e5; padding: 9px 10px; border-radius: 9px; font-size: 13px; font-weight: 500; }
+.language-field select:hover { border-color: #555555; }
+.swap-button { align-self: end; margin-bottom: 2px; height: 34px; border: 0; background: transparent; border-radius: 8px; color: #9c9c9c; font-size: 20px; }
+.swap-button:hover { background: #2b2b2b; color: #eeeeee; }
+.capture-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.action-button { min-width: 0; display: grid; grid-template-columns: 20px auto; justify-content: center; align-items: center; gap: 7px 8px; padding: 13px 8px 11px; border-radius: 12px; border: 1px solid transparent; }
+.action-label { font-size: 14px; font-weight: 600; }
+.action-button.primary { background: #f0f0f0; color: #191919; border-color: #f0f0f0; }
+.action-button.primary:hover { background: #ffffff; border-color: #ffffff; }
+.action-button.secondary { background: #dedede; color: #202020; border-color: #dedede; }
+.action-button.secondary:hover { background: #eeeeee; border-color: #eeeeee; }
+.action-shortcut { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 3px; min-height: 16px; opacity: .72; }
+kbd { display: inline-block; font-family: "Segoe UI", system-ui, sans-serif; font-size: 10px; font-weight: 450; line-height: 1.4; border-radius: 4px; background: #303030; color: #d0d0d0; padding: 2px 5px; white-space: nowrap; }
+.action-shortcut kbd { padding: 0; background: transparent; color: inherit; }
+.action-shortcut .muted { color: inherit; }
+.key-plus { font-size: 10px; color: #999999; }
+.action-shortcut .key-plus { color: inherit; }
+.status { margin: 12px 0 0; min-height: 16px; font-size: 11px; color: #9d9d9d; line-height: 1.5; text-align: center; overflow-wrap: anywhere; }
+.error, .status.error { color: #f28b82; }
+.settings-card { padding: 4px 16px; }
+.setting-row { min-height: 36px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.setting-row + .setting-row { border-top: 1px solid #303030; }
+.setting-row:first-child { min-height: 48px; }
+.setting-label { font-size: 12px; color: #cccccc; flex-shrink: 0; }
+.setting-description { margin: 4px 0 0; font-size: 10px; color: #949494; }
+.toggle { width: 32px; height: 19px; padding: 0; border: 0; border-radius: 20px; background: #454545; position: relative; flex-shrink: 0; }
+.toggle::after { content: ""; width: 15px; height: 15px; position: absolute; top: 2px; left: 2px; background: #aaaaaa; border-radius: 50%; transition: transform .15s, background .15s; }
+.toggle.on { background: #eeeeee; }
+.toggle.on::after { transform: translateX(13px); background: #191919; }
+.shortcut-button { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 3px; border: 0; background: transparent; border-radius: 6px; padding: 6px 0 6px 6px; font-size: 11px; min-width: 0; }
+.shortcut-button:hover kbd { background: #414141; color: #f0f0f0; }
+.shortcut-hint { font-size: 10px; color: #999999; margin-left: 6px; }
+.shortcut-button.recording { color: #eeeeee; }
+.app-footer { font-size: 10px; color: #8d8d8d; text-align: center; padding: 0 0 2px; }
+.loading-card { margin-top: 36px; padding: 24px; font-size: 13px; text-align: center; }
+.retry-button { margin-top: 12px; border: 0; background: #eeeeee; color: #191919; border-radius: 6px; padding: 6px 18px; }
+.muted { color: #a0a0a0; font-size: 11px; }
+html.capture-preparing, html.capture-preparing body { background: transparent !important; }
+body.capture-preparing #app { visibility: hidden !important; }
+body.capture-preparing *, body.capture-preparing *::before, body.capture-preparing *::after { animation: none !important; transition: none !important; }
+body[data-mode="overlay"], body[data-mode="overlay"] #app { background: transparent; }
+.overlay-root { position: fixed; inset: 0; }
+.overlay-image { position: absolute; }
+@media (max-width: 400px) {
+  .screen-app { padding: 14px; gap: 12px; }
+  .capture-card { padding: 14px 12px 12px; }
+  .language-row { gap: 5px; grid-template-columns: 1fr 28px 1fr; }
+  .capture-actions { gap: 8px; }
+  .shortcut-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }

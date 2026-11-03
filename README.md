@@ -1,120 +1,71 @@
-# Glance
+# ScreenTrans
 
-一款轻量级桌面截图翻译工具。快捷键截屏，框选即翻译，基于有道 OCR 实现实时图片翻译。
-
-使用 Tauri 2 + 原生窗口渲染，启动快、体积小。
-
-## 演示
-
-![demo](assets/demo.jpg)
-
-## 使用方法
-
-| 操作 | 说明 |
-|------|------|
-| `Ctrl+Shift+X` | 全局快捷键，启动截图（可在设置中修改） |
-| **鼠标左键拖拽** | 框选要翻译的区域 |
-| `Esc` | 取消截图 |
-| **鼠标右键** | 取消截图 |
-| **点击托盘图标** | 显示主窗口 |
-| **右键托盘图标** | 显示菜单（显示窗口 / 退出） |
-
-> 关闭主窗口不会退出程序，Glance 会常驻系统托盘（右下角）。
+个人使用的桌面截图翻译工具，基于 [Glance](https://github.com/Harukaon/Glance) 精简。保留截图翻译、截图取字和必要设置，文本翻译交给独立的浏览器扩展。
 
 ## 功能
 
-- 全局快捷键一键截图
-- 框选区域后自动调用有道 OCR 翻译
-- 翻译结果直接覆盖在原图位置
-- 支持多语言互译（中/英/日/韩/法/德/俄/西）
-- 翻译历史记录
-- 系统托盘常驻，关闭窗口不退出
-- 开机自启并静默进入系统托盘（可选）
+- 框选屏幕区域后翻译，在原位置显示译后图片。
+- 截图取字，将识别文字复制到剪贴板。
+- 源语言与目标语言选择、语言交换。
+- 两组可修改的全局快捷键，支持再次按下关闭截图。
+- 托盘入口、开机静默自启、主窗口置顶；关闭主窗口后驻留托盘。
+- 保留截图翻译的本地历史存储和现有原图/译图切换交互。
 
-## 技术栈
+首页只包含语言、两个截图按钮和基础设置。已删除文本输入/输出、朗读、多引擎文本翻译、模型/API Key/提示词、网络代理配置、弹出文本窗口快捷键和版本/更新检查。软件不会查询上游更新。
 
-- **后端**：Rust + Tauri 2
-- **前端**：原生 HTML / CSS / JavaScript（无框架）
-- **截图**：Windows BitBlt（通过 `screenshots` crate）
-- **选区窗口**：winit + softbuffer 原生渲染（无 WebView 开销）
-- **翻译 API**：有道智云 OCR 图片翻译
+| 操作 | 默认快捷键或入口 |
+| --- | --- |
+| 截图翻译 | `Ctrl+Shift+X`，首页或托盘按钮 |
+| 截图取字 | `Ctrl+Shift+C`，首页或托盘按钮 |
+| 取消截图 | `Esc` 或鼠标右键 |
+| 切换原图/译图 | 翻译完成后在结果区域右键 |
+| 修改快捷键 | 基础设置中点击对应快捷键；`Esc` 取消、`Backspace` 清除 |
+| 显示主窗口 | 点击托盘图标或托盘的“显示窗口” |
+| 退出 | 托盘菜单“退出” |
 
-## 项目结构
+Windows 当前截取鼠标所在显示器，不支持跨显示器拖选。截图翻译和取字仍使用原有有道远程图片接口；框选图片会发送到该接口。此次精简没有更换 OCR 或图片翻译服务。
 
-```
-src-tauri/
-├── src/
-│   ├── main.rs            # 应用入口，托盘 & 窗口管理
-│   ├── commands.rs        # Tauri 命令（截图、翻译、设置）
-│   ├── capture.rs         # 屏幕截图（BitBlt）
-│   ├── capture_window.rs  # 原生全屏选区窗口（winit + softbuffer）
-│   ├── api.rs             # 有道翻译 API 客户端
-│   ├── app_state.rs       # 全局状态管理
-│   ├── config.rs          # 配置持久化
-│   ├── models.rs          # 数据类型定义
-│   └── error.rs           # 错误处理
-├── icons/                 # 应用图标
-└── Cargo.toml
-ui/
-├── index.html             # 主窗口
-├── overlay.html           # 翻译结果浮层
-├── styles.css             # 样式
-└── app.js                 # 前端逻辑
-```
+## 技术与开发
 
-## 开发
+Rust + Tauri 2，静态 HTML/CSS/JavaScript；Windows 使用 `screenshots` 截屏，`winit` + `softbuffer` 渲染选区和翻译结果。前端不需要 npm 安装或构建。
 
-需要 Rust 工具链和 Tauri CLI：
+Windows 需要 Rust MSVC 工具链、C++ Build Tools、WebView2，以及开发服务使用的 Python。
 
-```bash
+```powershell
 cargo install tauri-cli --version "^2"
-```
-
-开发运行：
-
-```bash
 cargo tauri dev
-```
-
-打包：
-
-```bash
 cargo tauri build
 ```
 
-产物在 `src-tauri/target/release/bundle/` 下。
+`beforeDevCommand` 使用 `python dev_server.py`。打包配置中的产品名和主程序名是 `ScreenTrans`，Cargo 内部包名是 `screentrans`，应用标识是 `com.screen-trans.screentrans`。
 
-## Windows 便携版
+也可只编译可执行文件，不生成安装包：
 
-在 GitHub Release 下载 `Glance-windows-x64-portable.zip`，解压后直接运行 `Glance.exe`，无需安装。Windows 10/11 通常已经内置 Microsoft Edge WebView2 Runtime；若程序无法启动，请安装 [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 后重试。
-
-## macOS 安装说明
-
-由于 Glance 尚未启用付费开发者证书签名（不走 App Store），在 macOS 上首次下载安装后会触发系统安全拦截。
-
-### 处理“已损坏，无法打开”报错
-如果您通过浏览器下载后提示“已损坏，无法打开”，这通常是因为 macOS Gatekeeper 对未签名应用的严格隔离。请在终端执行以下命令：
-
-```bash
-sudo xattr -cr /Applications/Glance.app
+```powershell
+cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
 ```
 
-### 首次运行提示“无法验证开发者”
-1. 将 `Glance.app` 拖入 `Applications`（应用程序）文件夹。
-2. **不要直接双击打开**，而是在访达（Finder）中**右键点击** `Glance.app`，选择“打开”。
-3. 在弹出的对话框中再次选择“打开”。
-4. 如果依然无法运行，请前往 **系统设置 > 隐私与安全性**，点击下方的“仍要打开”。
+此时原始产物为 `src-tauri/target/release/screentrans.exe`；可命名为 `ScreenTrans.exe` 使用。Tauri CLI 打包时会采用 `mainBinaryName`。
 
-### 更新后截图全黑
+直接使用 Cargo 构建成品时，必须启用 `custom-protocol`，将页面资源嵌入程序。仅有 `--release` 不会切换 Tauri 的页面加载模式。未启用该功能的生产构建会被编译检查阻止，以免生成依赖本地开发服务器的成品。
 
-Glance 目前使用临时签名，macOS 可能会把更新后的版本识别为一个新应用，导致旧版本的屏幕录制授权不再生效。请前往 **系统设置 > 隐私与安全性 > 屏幕与系统音频录制**（旧版 macOS 为“屏幕录制”），将 Glance 的开关关闭后重新开启，再完全退出并重新打开 Glance。
+## 配置兼容
 
-如果设置中没有 Glance，先运行一次截图功能触发授权提示；仍无法恢复时，可在终端执行 `tccutil reset ScreenCapture com.harukaon.glance`，重新打开 Glance 并再次授权。
+首次启动时，若新应用目录尚无 `settings.json`，会尝试从旧的 `com.harukaon.glance` 数据目录迁移语言、截图快捷键、自启、置顶和截图浮层偏好。只序列化仍受支持的设置，不复制旧 API Key、模型、代理或弹出窗口配置；不覆盖已有 ScreenTrans 设置，也不修改原应用数据。
 
-## 许可证
+新应用仍使用 `settings.json` 和 `history.json`。旧截图历史留在旧目录；新截图历史写入 ScreenTrans 目录。旧版自启项由旧应用管理，如需弃用原版，应在原版中关闭自启并退出，避免两款应用争用同一截图快捷键。
 
-MIT
+## 验证
 
-## 友链
+```powershell
+node --test ui/*.test.mjs
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --features custom-protocol --manifest-path src-tauri/Cargo.toml
+```
 
-- [Linux.do](https://linux.do) — 一个真实、自由、纯粹的技术社区
+前端测试覆盖旧设置字段过滤、语言交换和快捷键录制/冲突。Rust 测试包含首次迁移保留截图设置、排除凭据和不覆盖新设置，以及原有截图坐标与快捷键行为。
+
+## 来源与许可
+
+原项目 Glance 的 README 标注 MIT；本项目保留其截图实现并进行个人用途精简。

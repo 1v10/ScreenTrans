@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     BoundingBox, OverlayRegion, RegionLine, SelectionPayload, TranslationHistoryItem,
-    TranslationPair, TranslationResponse, TranslatorSettings,
+    TranslationPair, TranslationResponse,
 };
 
 const IMAGE_TRANSLATE_SECRET: &str = "VPaHE3kX_vl4BhgYiu2n";
@@ -34,10 +34,9 @@ impl YoudaoClient {
         to_lang: String,
         selection: SelectionPayload,
         salt: Option<String>,
-        settings: &TranslatorSettings,
     ) -> AppResult<TranslationResponse> {
         let salt = salt.unwrap_or_else(random_salt_string);
-        let sign = build_upload_sign(settings.clientele.as_str(), &bytes, salt.as_str());
+        let sign = build_upload_sign("deskdict", &bytes, salt.as_str());
 
         let form = Form::new()
             .part(
@@ -47,7 +46,7 @@ impl YoudaoClient {
                     .mime_str(mime_type.as_str())
                     .map_err(AppError::Mime)?,
             )
-            .text("clientele", settings.clientele.clone())
+            .text("clientele", "deskdict")
             .text("salt", salt)
             .text("sign", sign)
             .text("from", from_lang)

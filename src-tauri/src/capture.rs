@@ -13,7 +13,7 @@ use std::{
 use crate::error::{AppError, AppResult};
 
 #[cfg(target_os = "macos")]
-const DEBUG_CAPTURE_DIR: &str = "/tmp/glance-debug/latest";
+const DEBUG_CAPTURE_DIR: &str = "/tmp/screentrans-debug/latest";
 
 /// Monitor info returned by find_cursor_monitor / find_primary_screen.
 #[derive(Clone, Copy)]
@@ -456,7 +456,7 @@ pub fn ensure_screen_capture_permission() -> AppResult<()> {
         .spawn();
 
     Err(AppError::Capture(
-        "macOS 未授予 Glance 屏幕录制权限。请在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中允许 Glance；若已开启，请关闭后重新开启，并完全退出 Glance 后重试。应用更新后可能需要重新授权。".into(),
+        "macOS 未授予 ScreenTrans 屏幕录制权限。请在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中允许 ScreenTrans；若已开启，请关闭后重新开启，并完全退出 ScreenTrans 后重试。应用更新后可能需要重新授权。".into(),
     ))
 }
 
@@ -1168,7 +1168,7 @@ fn temp_capture_path(ext: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    PathBuf::from(format!("/private/tmp/glance-capture-{ts}.{ext}"))
+    PathBuf::from(format!("/private/tmp/screentrans-capture-{ts}.{ext}"))
 }
 
 #[cfg(target_os = "macos")]

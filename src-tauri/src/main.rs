@@ -1,40 +1,35 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(all(not(debug_assertions), not(feature = "custom-protocol")))]
+compile_error!("Production builds require --features custom-protocol to embed the frontend. Use cargo tauri build or cargo build --release --features custom-protocol.");
+
+#[cfg(all(test, feature = "custom-protocol"))]
+mod packaging;
+
 mod api;
 mod app_state;
-mod bing_translate;
-mod builtin_translate;
 mod capture;
 mod capture_hotkey;
 mod capture_window;
 mod commands;
 mod config;
 mod error;
-mod google_translate;
-mod llm_translate;
 mod models;
-mod popup_shortcut;
 mod self_test;
 mod startup;
-mod translate_engine;
 
 use std::path::PathBuf;
 
 use api::YoudaoClient;
 use app_state::SharedState;
-use bing_translate::BingTranslateClient;
-use builtin_translate::BuiltinTranslateClient;
-use llm_translate::LlmTranslateClient;
 use commands::{
-    begin_capture, begin_copy_capture, cancel_capture, capture_debug_log, check_update,
-    clear_history, close_overlay, hide_window, list_history, load_capture_payload,
-    load_overlay_payload, load_settings, open_release_page, resize_main_window, save_settings,
-    set_pin_on_top, show_overlay, start_capture_translate, submit_capture_selection,
-    translate_text,
+    begin_capture, begin_copy_capture, cancel_capture, capture_debug_log, clear_history,
+    close_overlay, hide_window, list_history, load_capture_payload, load_overlay_payload,
+    load_settings, resize_main_window, save_settings, set_pin_on_top, show_overlay,
+    start_capture_translate, submit_capture_selection,
 };
 use config::ConfigStore;
 use models::TranslatorSettings;
-use translate_engine::TextTranslator;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -100,11 +95,16 @@ fn main() {
             let base_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from(".").join(".glance"));
+                .unwrap_or_else(|_| PathBuf::from(".").join(".screentrans"));
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
                 let config_store = ConfigStore::new(base_dir);
+                if let Some(parent) = config_store.base_dir().parent() {
+                    if let Err(err) = config_store.migrate_legacy_settings(parent.join("com.harukaon.glance")).await {
+                        tracing::warn!("legacy screenshot settings migration failed: {err}");
+                    }
+                }
                 config_store.ensure().await?;
                 let settings = config_store
                     .load_settings()
@@ -113,9 +113,6 @@ fn main() {
 
                 commands::apply_autostart(&app_handle, settings.autostart);
                 commands::apply_hotkey(&app_handle, &settings.hotkey);
-                if let Some(ref popup) = settings.popup_shortcut {
-                    commands::apply_popup_shortcut(&app_handle, popup);
-                }
                 commands::apply_copy_hotkey(&app_handle, &settings.copy_hotkey);
                 commands::apply_pin_on_top(&app_handle, settings.pin_on_top);
 
@@ -132,31 +129,8 @@ fn main() {
                         .build()?,
                 );
 
-                // Bing client with Bing-specific headers
-                let mut bing_headers = reqwest::header::HeaderMap::new();
-                bing_headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse().unwrap());
-                bing_headers.insert(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8".parse().unwrap());
-                bing_headers.insert(reqwest::header::ORIGIN, "https://cn.bing.com".parse().unwrap());
-
-                let bing_http = std::sync::Arc::new(
-                    reqwest::Client::builder()
-                        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                        .default_headers(bing_headers)
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()?,
-                );
-
-                let api_client = YoudaoClient::new(general_http.clone());
-                let bing_client = BingTranslateClient::new(bing_http);
-                let builtin_client = BuiltinTranslateClient::new();
-                let llm_client = LlmTranslateClient::new(general_http);
-                let text_translator = TextTranslator::new(bing_client, builtin_client, llm_client);
-                app_handle.manage(SharedState::new(
-                    config_store,
-                    settings,
-                    api_client,
-                    text_translator,
-                ));
+                let api_client = YoudaoClient::new(general_http);
+                app_handle.manage(SharedState::new(config_store, settings, api_client));
                 Ok::<(), error::AppError>(())
             })?;
 
@@ -165,12 +139,13 @@ fn main() {
 
             let show = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
             let capture_translate = MenuItemBuilder::with_id("capture_translate", "截图翻译").build(app)?;
+            let copy = MenuItemBuilder::with_id("copy", "截图取字").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&show, &capture_translate, &quit]).build()?;
+            let menu = MenuBuilder::new(app).items(&[&show, &capture_translate, &copy, &quit]).build()?;
 
             TrayIconBuilder::new()
                 .icon(icon)
-                .tooltip("Glance")
+                .tooltip("ScreenTrans")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
@@ -178,6 +153,13 @@ fn main() {
                     }
                     "capture_translate" => {
                         start_capture_translate(app);
+                    }
+                    "copy" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app_clone.state::<SharedState>();
+                            let _ = begin_copy_capture(app_clone.clone(), state).await;
+                        });
                     }
                     "quit" => {
                         app.exit(0);
@@ -229,13 +211,10 @@ fn main() {
             show_overlay,
             load_overlay_payload,
             close_overlay,
-            translate_text,
             resize_main_window,
             set_pin_on_top,
             hide_window,
             capture_debug_log,
-            check_update,
-            open_release_page
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app");

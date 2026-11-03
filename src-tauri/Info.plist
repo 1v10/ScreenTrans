@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Glance requires screen recording permission to capture the screen for translation.</string>
+  <string>ScreenTrans requires screen recording permission to capture the screen for translation.</string>
 </dict>
 </plist>
