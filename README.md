@@ -34,7 +34,7 @@ Windows 需要 Rust MSVC 工具链、C++ Build Tools、WebView2，以及开发�
 ```powershell
 cargo install tauri-cli --version "^2"
 cargo tauri dev
-cargo tauri build
+cargo tauri build --features custom-protocol
 ```
 
 `beforeDevCommand` 使用 `python dev_server.py`。打包配置中的产品名和主程序名是 `ScreenTrans`，Cargo 内部包名是 `screentrans`，应用标识是 `com.screen-trans.screentrans`。

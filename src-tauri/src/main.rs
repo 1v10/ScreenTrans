@@ -1,7 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(all(not(debug_assertions), not(feature = "custom-protocol")))]
-compile_error!("Production builds require --features custom-protocol to embed the frontend. Use cargo tauri build or cargo build --release --features custom-protocol.");
+// Tauri CLI can enable tauri/custom-protocol directly, without the app's wrapper feature.
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    !tauri::is_dev(),
+    "Production builds require custom-protocol to embed the frontend. Use cargo tauri build --features custom-protocol or cargo build --release --features custom-protocol."
+);
 
 #[cfg(all(test, feature = "custom-protocol"))]
 mod packaging;
